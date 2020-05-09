@@ -1,0 +1,216 @@
+---
+title: "Practical Machine Learning - Exercise Prediction Assignment"
+author: "Fraser Stark"
+date: "08/05/2020"
+output: 
+  html_document:
+    keep_md: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Summary 
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These types of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, the goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of six participants. They were asked to perform barbell lifts correctly and incorrectly in five different ways. More information is available from the website [here](http://groupware.les.inf.puc-rio.br/har).
+
+The goal of this study is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. The training data for this project are available [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv). The test data are available [here](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv).
+
+
+## Load required libraries
+
+First of all we need to load the libraries we'll be using for this study. For model training, we'll make use of the `caret` package, which stands for *C*lassification *A*nd *Re*gression *T*raining.  
+
+
+```{r, message=FALSE, warning=FALSE}
+library(caret)
+library(corrplot)
+library(e1071)
+library(rpart)
+library(rattle)
+```
+
+
+## Getting and loading the data
+
+```{r}
+train_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+test_url <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+train <- read.csv(url(train_url))
+test <- read.csv(url(test_url))
+
+dim(train); dim(test)
+```
+
+We can see here that the training dataset contains 19622 observations - we'll use this to create a separate partition for validating our models later. We'll use the test data once we have evaluated the performance of our models. 
+
+## Data preprocessing
+
+As can be seen below, the first seven columns appear to be used to identify the participant in the study and are irrelevant for the purposes of our study. 
+
+```{r}
+names(train[,1:7])
+```
+
+We can remove these from both sets of data. 
+
+```{r}
+train <- train[,-c(1:7)]
+test <- test[,-c(1:7)]
+```
+
+
+Some of the variables in the dataset contain no variability, and these will not be useful when it comes to constructing prediction models. We can use the `nearZeroVar` function from caret to identify and remove these variables from our training and test datasets. 
+
+```{r}
+nzv <- nearZeroVar(train)
+
+train <- train[-nzv]
+test <- test[-nzv]
+```
+
+And we can also discard columns which contain mostly NA values, our threshold here is 95%
+
+```{r}
+na_cols <- sapply(train, function(x) mean(is.na(x))) > 0.95
+
+train <- train[, na_cols==FALSE]
+test <- test[,na_cols==FALSE]
+```
+
+The rest of the dataset includes some factor variables, but we want these to be numeric.
+
+```{r}
+numeric_cols <- colnames(train)[-ncol(train)]  # Select all but the last column
+train[numeric_cols] <- sapply(train[numeric_cols], as.numeric)
+```
+
+
+```{r}
+dim(train); dim(test)
+```
+
+
+## Exploratory Data Analysis
+
+Now that we've finished cleaning and preprocessing the data, we can use the `corrplot` package to visualise a correlation matrix. In the figure below, positive correlations between the variables are shown in larger dark blue circles, and negative correlations are shown in larger dark red circles.
+
+```{r, fig.height=8, fig.width=8}
+mat <- cor(train[,-53])
+corrplot(mat, method = "circle", type = "lower", tl.cex = 0.7, tl.col = rgb(0,0,0))
+```
+
+
+## Predictive Modelling 
+
+Let's take a step back and remind ourselves of the objective of the study. The goal is to use the data from the various sensors (visualised above), to make a prediction about the manner of the exercise - which is stored in our dataset as `classe`. There are many to choose from, but we will explore the use of three algorithms - Decision Trees, Random Forest, and Gradient Boosted Model.
+
+Before we start training any models, we need to use the `createDataPartition` function (from the `caret` package) to set aside 30% of the training data into a new 'probe' dataset which we'll use to perform validation to assess how well the model might perform out of sample. 
+
+```{r}
+inTrain <- createDataPartition(train$classe, p = .7, list = FALSE)
+train <- train[inTrain,]
+probe <- train[-inTrain,]  # Validation dataset
+```
+
+
+### Decision Tree
+
+Decision Trees are easy to interpret and generally perform better than regression models when the relationships are non linear. We've already loaded the caret packages and can fit a Decision Tree model like below. When we call `train` from the caret package, we tell it which model to fit (`method = "rpart"`), and the formula for the first argument (`classe ~ .`) which means we want to model `classe` as a function of all the other variables. 
+
+```{r}
+set.seed(521)
+dtModel <- train(classe ~ ., 
+                data = train, 
+                method = "rpart", 
+                trControl=trainControl(method = "none"), 
+                tuneGrid=data.frame(cp=0.01)) 
+
+dtModel
+```
+
+
+```{r, warning-FALSE, message=FALSE, fig.height=8, fig.width=8}
+fancyRpartPlot(dtModel$finalModel)
+```
+
+We can use the `predict` function provided by caret to apply the model to our probe dataset, and then build a `confusionMatrix` to visualise the results. 
+
+```{r}
+dtPredict <- predict(dtModel, newdata = probe)
+
+confusionMatrix(dtPredict, probe$classe)
+```
+
+We can see from these results that the Decision Tree model scores an accuracy of 0.75, which would result in an Out of Sample Error of 25%. 
+
+
+### Random Forest
+
+With Random Forest models we will use `trainControl` when fitting, which allows us to tune the parameters and we're going to use it to specify the resampling method (`method = "cv"`) for Cross Validation. This is then provided as a parameter to the call to `train`. 
+
+The syntax and parameters for train are similar throughout, however this time we pass `rf` as the method. 
+
+```{r}
+tc <- trainControl(method = "cv", number = 3, verboseIter=FALSE)
+```
+
+```{r}
+set.seed(521)
+rfModel <- train(classe ~ .,
+                 data = train,
+                 method = "rf",
+                 trControl = tc
+                 )
+
+rfModel
+```
+
+Let's look at the prediction results against the validation dataset.
+
+```{r}
+rfPredict <- predict(rfModel, newdata = probe)
+
+confusionMatrix(rfPredict, probe$classe)
+```
+
+The Random Forest results yield a result of 100% accuracy. I would expect this to be high, but not quite perfect...so this should be investigated further and examined for overfitting. I'll run with this (for now) and make any corrections to the source code on GitHub, but often at times it's better to sacrifice a little accuracy for a more robust model which will perform well with new data.  
+
+
+### Generalised Boosted Model
+
+Better known as Gradient Boosting - boosting is another famous ensemble learning algorithm, where the aim is to reduce the high variance of learners by taking the average of lots of models fitted on bootstrapped data. 
+
+
+```{r}
+set.seed(521)
+gbmModel <- train(classe ~ .,
+                  data = train,
+                  method = "gbm",
+                  trControl = tc,
+                  verbose = FALSE)
+
+gbmModel
+```
+
+
+```{r}
+gbmPredict <- predict(gbmModel, newdata = probe)
+
+confusionMatrix(gbmPredict, probe$classe)
+```
+
+We can see from above that the final model used 150 trees at an interaction.depth of 3. Finally giving an accuracy of 97% for the Gradient Boosting model - again, this is expected to be high.
+
+
+## Predicting against the Test dataset
+
+Finally we can use our trained Random Forest model to make predictions against the test dataset provided with the study. 
+
+```{r}
+predict(rfModel, newdata = test)
+```
+
+The output above represents the predictions to the 20 observations in the test dataset, and is currently 100% accurate. 
